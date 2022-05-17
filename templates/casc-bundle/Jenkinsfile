@@ -6,21 +6,33 @@ pipeline {
     timeout(time: 60, unit: 'MINUTES')
   }
   stages {
-    stage('Update Config Bundle') {
-      agent {
-        kubernetes {
-          yaml libraryResource ('podtemplates/kubectl.yml')
-        }
-      }
+    stage('Publish CasC Bundle Update Event') {
+      agent { label 'default' }
       when {
         beforeAgent true
         branch 'main'
       }
+      environment { CASC_UPDATE_SECRET = credentials('casc-update-secret') }
       steps {
-        container("kubectl") {
-          sh "mkdir -p ${BUNDLE_ID}"
-          sh "find -name '*.yaml' | xargs cp --parents -t ${BUNDLE_ID}"
-          sh "kubectl cp --namespace cbci ${BUNDLE_ID} cjoc-0:/var/jenkins_home/jcasc-bundles-store/ -c jenkins"
+        gitHubParseOriginUrl()
+        publishEvent event:jsonEvent("""
+          {
+            'controller':{'name':'${BUNDLE_ID}','action':'casc_bundle_update','bundle_id':'${BUNDLE_ID}'},
+            'github':{'organization':'${GITHUB_ORG}','repository':'${GITHUB_REPO}'},
+            'secret':'${CASC_UPDATE_SECRET}',
+            'casc':{'auto_reload':'false'}
+          }
+        """), verbose: true
+
+        withCredentials([usernamePassword(credentialsId: 'api-token', usernameVariable: 'JENKINS_CLI_USR',     passwordVariable: 'JENKINS_CLI_PSW')]) {
+          waitUntil {
+            script {
+              def UPDATE_AVAILABLE = sh (script: '''curl -s --user $JENKINS_CLI_USR:$JENKINS_CLI_PSW -XGET http://${BUNDLE_ID}.controllers.svc.cluster.local/${BUNDLE_ID}/casc-bundle-mgnt/check-bundle-update  | jq '.["update-available"]' | tr -d "\n" ''', 
+                returnStdout: true) 
+              echo "update available: ${UPDATE_AVAILABLE}"
+              return (UPDATE_AVAILABLE=="true")
+            }
+          }
         }
       }
     }
